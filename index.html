@@ -1,0 +1,155 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Fourier curve fitting</title>
+<link href="https://fonts.googleapis.com/css2?family=Newsreader:wght@500&family=IBM+Plex+Sans:wght@400;500&display=swap" rel="stylesheet">
+<style>
+:root{--bg:#f2f5f1;--panel:#fbfcfa;--ink:#1a2a2e;--mute:#5d6e70;--line:#d3dcd5;--grid:#e1e8e2;--curve:#0b7a75;--pt:#c2410c;--err:#b42318;
+box-sizing:border-box;padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px)}
+@media (prefers-color-scheme:dark){:root:not([data-theme="light"]){--bg:#101a1c;--panel:#162326;--ink:#e3ece8;--mute:#8da09f;--line:#2a3c3f;--grid:#203033;--curve:#3fd0c4;--pt:#ff9a5c;--err:#ff8a80}}
+:root[data-theme="dark"]{--bg:#101a1c;--panel:#162326;--ink:#e3ece8;--mute:#8da09f;--line:#2a3c3f;--grid:#203033;--curve:#3fd0c4;--pt:#ff9a5c;--err:#ff8a80}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--ink);font:15px/1.5 "IBM Plex Sans",system-ui,sans-serif}
+main{max-width:1100px;margin:0 auto;padding:20px 16px 40px}
+h1{font:500 30px/1.2 Newsreader,Georgia,serif;margin:0 0 4px}
+h2{font:500 16px/1.3 "IBM Plex Sans",sans-serif;margin:0 0 10px}
+.sub{color:var(--mute);margin:0 0 18px}
+.grid{display:grid;grid-template-columns:minmax(260px,340px) 1fr;gap:16px}
+@media (max-width:760px){.grid{grid-template-columns:1fr}}
+.card{background:var(--panel);border:1px solid var(--line);border-radius:6px;padding:14px;margin-bottom:16px;min-width:0}
+label{display:block;color:var(--mute);font-size:13px;margin:10px 0 3px}
+textarea,input{width:100%;font:inherit;color:var(--ink);background:var(--bg);border:1px solid var(--line);border-radius:4px;padding:6px 8px}
+textarea{height:230px;resize:vertical;font-variant-numeric:tabular-nums}
+textarea:focus-visible,input:focus-visible{outline:2px solid var(--curve);outline-offset:1px}
+canvas{width:100%;height:380px;display:block}
+.legend{display:flex;gap:16px;color:var(--mute);font-size:13px;margin-top:6px}
+.legend i{display:inline-block;width:10px;height:10px;border-radius:50%;margin-right:5px;vertical-align:-1px}
+.scroll{overflow-x:auto}
+table{border-collapse:collapse;width:100%;font-variant-numeric:tabular-nums}
+th,td{padding:5px 10px;border-bottom:1px solid var(--line);text-align:right;white-space:nowrap}
+th:first-child,td:first-child{text-align:left}
+th{color:var(--mute);font-weight:500}
+.formula{overflow-x:auto;white-space:nowrap;padding:8px;background:var(--bg);border-radius:4px;font-variant-numeric:tabular-nums}
+.err{color:var(--err);min-height:1.4em;margin:8px 0 0}
+</style>
+</head>
+<body>
+<main>
+<h1>Fourier curve fitting</h1>
+<p class="sub">y(x) = a₀ + Σ [aₖ cos(kωx) + bₖ sin(kωx)], with a₀ = (1/L)Σy, aₖ = (2/L)Σ y cos(kωx), bₖ = (2/L)Σ y sin(kωx).</p>
+<div class="grid">
+  <section class="card">
+    <h2>Input</h2>
+    <label for="pts">Points (one “x y” per line)</label>
+    <textarea id="pts" spellcheck="false"></textarea>
+    <label for="n">Harmonics N</label><input id="n" type="number" min="0" step="1" value="3">
+    <p class="err" id="err" role="alert"></p>
+  </section>
+  <section class="card">
+    <h2>Points and curve</h2>
+    <canvas id="cv" role="img" aria-label="Scatter plot of input points with the Fourier series curve"></canvas>
+    <div class="legend"><span><i style="background:var(--pt)"></i>input points</span><span><i style="background:var(--curve)"></i>Fourier series</span></div>
+  </section>
+</div>
+<section class="card"><h2>Series</h2><div class="formula" id="formula"></div></section>
+<div class="grid" style="grid-template-columns:repeat(auto-fit,minmax(300px,1fr))">
+  <section class="card"><h2>Coefficients</h2><div class="scroll"><table id="ctab"></table></div></section>
+  <section class="card"><h2>Points</h2><div class="scroll"><table id="ptab"></table></div></section>
+</div>
+</main>
+<script>
+const DEFAULT_POINTS=[[1,13],[2,15],[3,18],[4,21],[5,25],[6,27],[7,29],[8,29],[9,29],[10,26],[11,19],[12,17]];
+const $=id=>document.getElementById(id);
+const css=n=>getComputedStyle(document.documentElement).getPropertyValue(n).trim();
+const f=(v,d=6)=>(v<0?"−":"")+Math.abs(v).toFixed(d);
+let state=null;
+
+function parse(){
+  const pts=[];
+  for(const line of $("pts").value.split("\n")){
+    const t=line.replace(/[(),;]/g," ").trim().split(/\s+/).filter(Boolean);
+    if(!t.length)continue;
+    const x=parseFloat(t[0]),y=parseFloat(t[1]);
+    if(t.length<2||!isFinite(x)||!isFinite(y))throw new Error("Cannot read line: “"+line.trim()+"”. Use “x y”.");
+    pts.push([x,y]);
+  }
+  return pts;
+}
+// Same steps as fourier() in Final.py
+function fourier(x,y,n){
+  const L=x.length;
+  if(n<0||2*n+1>L)throw new Error("Need 2N+1 ≤ number of points (N="+n+", points="+L+").");
+  const T=Math.max(...x)-Math.min(...x);
+  if(!(T>0))throw new Error("x values must not all be equal.");
+  const w=2*Math.PI*(L-1)/(T*L);
+  const a0=y.reduce((s,v)=>s+v,0)/L;
+  const a=[],b=[];
+  for(let k=1;k<=n;k++){
+    let sa=0,sb=0;
+    for(let i=0;i<L;i++){sa+=y[i]*Math.cos(k*w*x[i]);sb+=y[i]*Math.sin(k*w*x[i]);}
+    a.push(2/L*sa);b.push(2/L*sb);
+  }
+  return {a0,a,b,w};
+}
+// Same as finalize() in Final.py
+function finalize(s,xv){
+  let y=s.a0;
+  for(let k=1;k<=s.a.length;k++)y+=s.a[k-1]*Math.cos(k*s.w*xv)+s.b[k-1]*Math.sin(k*s.w*xv);
+  return y;
+}
+
+function update(){
+  $("err").textContent="";
+  try{
+    const pts=parse(),N=parseInt($("n").value,10);
+    if(!Number.isInteger(N))throw new Error("N must be an integer.");
+    if(pts.length<1)throw new Error("Enter at least one point.");
+    state={pts,N,s:fourier(pts.map(p=>p[0]),pts.map(p=>p[1]),N)};
+    tables();draw();
+  }catch(e){$("err").textContent=e.message;state=null;draw();}
+}
+function tables(){
+  const {pts,N,s}=state;
+  $("formula").innerHTML="y(x) = "+f(s.a0)+s.a.map((a,i)=>{const k=i+1,b=s.b[i];
+    return " "+(a<0?"−":"+")+" "+Math.abs(a).toFixed(4)+"·cos("+(k*s.w).toFixed(5)+"x) "+(b<0?"−":"+")+" "+Math.abs(b).toFixed(4)+"·sin("+(k*s.w).toFixed(5)+"x)";}).join("")
+    +"<br>ω = "+s.w.toFixed(6);
+  let h="<tr><th>k</th><th>aₖ</th><th>bₖ</th></tr><tr><td>0</td><td>a₀ = "+f(s.a0)+"</td><td>—</td></tr>";
+  for(let k=1;k<=N;k++)h+="<tr><td>"+k+"</td><td>"+f(s.a[k-1])+"</td><td>"+f(s.b[k-1])+"</td></tr>";
+  $("ctab").innerHTML=h;
+  h="<tr><th>#</th><th>x</th><th>y</th></tr>";
+  pts.forEach((p,i)=>{h+="<tr><td>"+(i+1)+"</td><td>"+p[0]+"</td><td>"+p[1]+"</td></tr>";});
+  $("ptab").innerHTML=h;
+}
+function draw(){
+  const cv=$("cv"),dpr=window.devicePixelRatio||1,W=cv.clientWidth,H=cv.clientHeight;
+  cv.width=W*dpr;cv.height=H*dpr;
+  const g=cv.getContext("2d");g.setTransform(dpr,0,0,dpr,0,0);g.clearRect(0,0,W,H);
+  if(!state)return;
+  const {pts,s}=state,xs=pts.map(p=>p[0]),x0=Math.min(...xs),x1=Math.max(...xs);
+  const cx=[],cy=[];for(let i=0;i<=500;i++){const x=x0+(x1-x0)*i/500;cx.push(x);cy.push(finalize(s,x));}
+  const ys=pts.map(p=>p[1]).concat(cy);let y0=Math.min(...ys),y1=Math.max(...ys);
+  const pad=(y1-y0||1)*0.08;y0-=pad;y1+=pad;
+  const L=48,R=12,T=10,B=28,X=x=>L+(x-x0)/(x1-x0)*(W-L-R),Y=y=>H-B-(y-y0)/(y1-y0)*(H-T-B);
+  const nice=(lo,hi,n)=>{const r=(hi-lo)/n,e=Math.pow(10,Math.floor(Math.log10(r))),m=r/e,st=(m<1.5?1:m<3?2:m<7?5:10)*e,t=[];for(let v=Math.ceil(lo/st)*st;v<=hi+1e-9;v+=st)t.push(+v.toPrecision(12));return t;};
+  g.font="12px 'IBM Plex Sans',sans-serif";g.lineWidth=1;
+  const tx=nice(x0,x1,Math.max(2,Math.floor(W/80))),ty=nice(y0,y1,6);
+  g.strokeStyle=css("--grid");g.fillStyle=css("--mute");
+  g.textAlign="center";tx.forEach(v=>{g.beginPath();g.moveTo(X(v),T);g.lineTo(X(v),H-B);g.stroke();g.fillText(v,X(v),H-B+16);});
+  g.textAlign="right";ty.forEach(v=>{g.beginPath();g.moveTo(L,Y(v));g.lineTo(W-R,Y(v));g.stroke();g.fillText(v,L-6,Y(v)+4);});
+  g.strokeStyle=css("--mute");g.beginPath();g.moveTo(L,T);g.lineTo(L,H-B);g.lineTo(W-R,H-B);g.stroke();
+  if(y0<0&&y1>0){g.beginPath();g.moveTo(L,Y(0));g.lineTo(W-R,Y(0));g.stroke();}
+  if(x0<0&&x1>0){g.beginPath();g.moveTo(X(0),T);g.lineTo(X(0),H-B);g.stroke();}
+  g.strokeStyle=css("--curve");g.lineWidth=2.2;g.beginPath();
+  cx.forEach((x,i)=>i?g.lineTo(X(x),Y(cy[i])):g.moveTo(X(x),Y(cy[i])));g.stroke();
+  g.fillStyle=css("--pt");pts.forEach(p=>{g.beginPath();g.arc(X(p[0]),Y(p[1]),4,0,7);g.fill();});
+}
+$("pts").value=DEFAULT_POINTS.map(p=>p.join(" ")).join("\n");
+["pts","n"].forEach(i=>$(i).addEventListener("input",update));
+addEventListener("resize",draw);
+matchMedia("(prefers-color-scheme:dark)").addEventListener("change",draw);
+update();
+</script>
+</body>
+</html>
